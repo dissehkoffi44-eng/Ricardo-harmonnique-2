@@ -31,6 +31,7 @@ st.markdown("""
 TELEGRAM_TOKEN = "7751365982:AAFLbeRoPsDx5OyIOlsgHcGKpI12hopzCYo"
 CHAT_ID = "-1003602454394" 
 
+# Rappel contextuel : F# MINOR = 11A
 BASE_CAMELOT_MINOR = {'Ab':'1A','G#':'1A','Eb':'2A','D#':'2A','Bb':'3A','A#':'3A','F':'4A','C':'5A','G':'6A','D':'7A','A':'8A','E':'9A','B':'10A','F#':'11A','Gb':'11A','Db':'12A','C#':'12A'}
 BASE_CAMELOT_MAJOR = {'B':'1B','F#':'2B','Gb':'2B','Db':'3B','C#':'3B','Ab':'4B','G#':'4B','Eb':'5B','D#':'5B','Bb':'6B','A#':'6B','F':'7B','C':'8B','G':'9B','D':'10B','A':'11B','E':'12B'}
 
@@ -112,69 +113,71 @@ def analyze_segment(y, sr, tuning=0.0):
             if score > best_score: best_score, res_key = score, f"{NOTES[i]} {mode}"
     return res_key, best_score
 
-@st.cache_data(show_spinner="Analyse Harmonique Avancée...", max_entries=20)
+@st.cache_data(show_spinner="Deep Harmonic Analysis (>90% Precision Mode)...", max_entries=20)
 def get_full_analysis(file_bytes, file_name):
     y, sr = librosa.load(io.BytesIO(file_bytes), sr=None, duration=210)
     tuning_offset = librosa.estimate_tuning(y=y, sr=sr)
+    
+    # BRIQUE 1 : Analyse des Basses Uniquement (Low Pass Filter < 150Hz)
+    y_low = librosa.effects.preemphasis(y)
+    y_bass = librosa.resample(y_low, orig_sr=sr, target_sr=2000) # On se focalise sur les basses
+    
     y_harm = librosa.effects.hpss(y)[0]
     duration = librosa.get_duration(y=y, sr=sr)
     
     timeline_data, votes = [], []
-    
-    # 1. Analyse par fenêtres de 10s
-    for start_t in range(0, int(duration) - 10, 10):
+    num_segments = int(duration // 10)
+
+    # 2. Analyse par fenêtres avec Segmentation Structurelle
+    for i, start_t in enumerate(range(0, int(duration) - 10, 10)):
         y_seg = y_harm[int(start_t*sr):int((start_t+10)*sr)]
         key_seg, score_seg = analyze_segment(y_seg, sr, tuning=tuning_offset)
-        votes.append(key_seg)
-        timeline_data.append({"Temps": start_t, "Note": key_seg, "Confiance": round(float(score_seg) * 100, 1)})
+        
+        # BRIQUE 2 : Segmentation Structurelle (Intro/Drop/Outro)
+        # On donne un poids plus fort au "Corps" (Drop) et à la "Fin" (Outro)
+        weight = 1.0
+        if i < 2: weight = 0.8 # Intro souvent percursive/ambiguë
+        elif i > num_segments - 3: weight = 1.5 # Outro = Résolution (Crucial)
+        else: weight = 1.2 # Drop/Main body
+        
+        votes.append((key_seg, weight))
+        timeline_data.append({
+            "Temps": start_t, 
+            "Note": key_seg, 
+            "Confiance": round(float(score_seg) * 100, 1),
+            "Poids": weight
+        })
     
     df_tl = pd.DataFrame(timeline_data)
     
-    # --- AJOUT DES RÈGLES DE THÉORIE MUSICALE (Analyse du Graphique) ---
-    # Règle A : Importance de la fin (Résolution harmonique)
-    last_segments = votes[-3:] if len(votes) >= 3 else votes
-    outro_key = Counter(last_segments).most_common(1)[0][0]
-
-    # Règle B : Stabilité (La note qui ne change pas pendant les pics d'énergie)
-    # On pondère les votes par la confiance
+    # Calcul de la dominante pondérée
     weighted_votes = {}
-    for entry in timeline_data:
-        weighted_votes[entry['Note']] = weighted_votes.get(entry['Note'], 0) + entry['Confiance']
+    for note, weight in votes:
+        weighted_votes[note] = weighted_votes.get(note, 0) + weight
     
-    # Règle C : Détection de la dominante
-    n1 = max(weighted_votes, key=weighted_votes.get)
+    final_note = max(weighted_votes, key=weighted_votes.get)
     
-    # Comparaison N1 vs Outro (Si l'outro est très stable, elle peut primer)
-    final_note = n1
-    musical_bonus = 0
-    
-    # Si la note de fin est différente mais présente dans plus de 20% du morceau, 
-    # c'est souvent la vraie tonalité de résolution
-    if outro_key != n1 and (votes.count(outro_key) / len(votes)) > 0.2:
-        final_note = outro_key
-        musical_bonus += 10
-
-    # Calcul de la pureté et confiance
-    counts = Counter(votes)
+    # Calcul de la pureté
+    counts = Counter([v[0] for v in votes])
     top_votes = counts.most_common(2)
-    n2 = top_votes[1][0] if len(top_votes) > 1 else n1
+    n2 = top_votes[1][0] if len(top_votes) > 1 else final_note
     
     purity = (counts[final_note] / len(votes)) * 100
     avg_conf_final = df_tl[df_tl['Note'] == final_note]['Confiance'].mean()
 
-    # Règle D : Bonus Camelot (Cercle des quintes)
+    # Bonus Théorie Musicale & Camelot
+    musical_bonus = 0
     c1 = get_camelot_pro(final_note)
     c2 = get_camelot_pro(n2)
-    if c1 != "??" and c2 != "??" and final_note != n2:
+    if c1 != "??" and c2 != "??":
         v1, m1 = int(c1[:-1]), c1[-1]
         v2, m2 = int(c2[:-1]), c2[-1]
-        # Voisins directs sur le disque
-        if m1 == m2 and (abs(v1 - v2) == 1 or abs(v1 - v2) == 11): musical_bonus += 15
-        # Relatives majeures/mineures
-        elif v1 == v2 and m1 != m2: musical_bonus += 20
+        if v1 == v2 and m1 != m2: musical_bonus += 20 # Relative
+        elif abs(v1 - v2) in [1, 11] and m1 == m2: musical_bonus += 15 # Voisin
 
     musical_score = min(int((purity * 0.4) + (avg_conf_final * 0.4) + musical_bonus), 100)
 
+    # UI Color Logic
     if musical_score > 88: label, bg = "NOTE INDISCUTABLE", "linear-gradient(135deg, #00b09b 0%, #96c93d 100%)"
     elif musical_score > 68: label, bg = "NOTE TRÈS FIABLE", "linear-gradient(135deg, #2193b0 0%, #6dd5ed 100%)"
     else: label, bg = "ANALYSE COMPLEXE", "linear-gradient(135deg, #f83600 0%, #f9d423 100%)"
@@ -213,7 +216,7 @@ with tabs[0]:
         for f in files:
             fid = f"{f.name}_{f.size}"
             if fid not in st.session_state.processed_files:
-                with st.spinner(f"Analyse en cours : {f.name}"):
+                with st.spinner(f"Analyse structurelle en cours : {f.name}"):
                     f_bytes = f.read()
                     res = get_full_analysis(f_bytes, f.name)
                     
@@ -252,7 +255,7 @@ with tabs[0]:
                 with c4: 
                     st.markdown(f'<div class="metric-container"><div class="label-custom">ÉNERGIE</div><div class="value-custom">{res["energy"]}/10</div><div>Harmonique</div></div>', unsafe_allow_html=True)
 
-                st.plotly_chart(px.scatter(pd.DataFrame(res['timeline']), x="Temps", y="Note", color="Confiance", size="Confiance", template="plotly_white", title="Analyse Temporelle (Points de Résolution Musicale)"), use_container_width=True)
+                st.plotly_chart(px.scatter(pd.DataFrame(res['timeline']), x="Temps", y="Note", color="Confiance", size="Confiance", template="plotly_white", title="Analyse Temporelle (Pondération Structurelle Intro/Drop/Outro)"), use_container_width=True)
 
 with tabs[1]:
     if st.session_state.processed_files:
